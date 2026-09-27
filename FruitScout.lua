@@ -1,4 +1,4 @@
--- FRUIT SCOUT MOBILE v3. Paste this entire file into the executor editor.
+-- FRUIT SCOUT MOBILE v4. Paste this entire file into the executor editor.
 -- Hide/reopen with the floating Scout button. Drag the title or floating button.
 -- Scans loaded fruit candidates. Auto hop starts only when you tap its button.
 -- The bundled source is compiled locally; there are no remote code downloads.
@@ -60,7 +60,7 @@ local function text(value, y, h, size)
         Font=Enum.Font.Gotham, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
         TextYAlignment=Enum.TextYAlignment.Top}, panel)
 end
-local titleBar = text("FRUIT SCOUT  -  drag to move", 8, 32, 15)
+local titleBar = text("FRUIT SCOUT v4  -  drag to move", 8, 32, 15)
 titleBar.Name = "DragHandle"
 titleBar.Active = true
 local status = text("Script started. Preparing scanner...", 43, 46, 14)
@@ -197,11 +197,19 @@ local function setup()
     local canResume = type(queueFn) == "function" and canPersist and type(SOURCE) == "string"
     local queued, scans, nextHop, message = false, 0, os.clock()+40, "Scanning this server"
     local retryAfter, lastTeamAttempt = 0, 0
-    local visited = {}
+    env.FruitScoutVisited = env.FruitScoutVisited or {}
+    local visited = env.FruitScoutVisited[key] or {}
+    env.FruitScoutVisited[key] = visited
     local saved = read("Visited")
     if type(saved) == "string" then
         local ok, decoded = pcall(function() return Http:JSONDecode(saved) end)
-        if ok and type(decoded) == "table" then visited = decoded end
+        if ok and type(decoded) == "table" then
+            for id, at in pairs(decoded) do
+                if type(at)=="number" and (type(visited[id])~="number" or at>visited[id]) then
+                    visited[id]=at
+                end
+            end
+        end
     end
     for id, at in pairs(visited) do
         if type(at) ~= "number" or os.time()-at > 3600 then visited[id] = nil end
@@ -305,9 +313,14 @@ local function setup()
         if type(data)~="table" or type(data.data)~="table" then error("Unexpected server list format") end
         return data
     end
-    local failedTeleport=false
-    table.insert(connections,TP.TeleportInitFailed:Connect(function(who,_,err)
-        if who==player and busy then failedTeleport=true; message="Teleport failed: "..tostring(err) end
+    local failedTeleport, targetServer=false,nil
+    table.insert(connections,TP.TeleportInitFailed:Connect(function(who,_,err,placeId,options)
+        if who~=player or not busy or not targetServer then return end
+        if placeId and placeId~=game.PlaceId then return end
+        local failedId=options and options.ServerInstanceId
+        if failedId and failedId~="" and failedId~=targetServer then return end
+        failedTeleport=true
+        message="Join failed: "..tostring(err):sub(1,100)
     end))
     local function hop()
         if busy or stopped then return end
@@ -318,29 +331,47 @@ local function setup()
             message="Choose a team and wait for your character before hopping."; return
         end
         busy=true
+        hopButton.Text="Cancel hop"
         retryAfter=os.clock()+10
         local epoch=version
         local function active() return not stopped and version==epoch end
         local ok, err=pcall(function()
-            local cursor, chosen=nil,nil
-            for page=1,5 do
+            local cursor, page, attempts=nil,0,0
+            local pool, seen, cursors={}, {}, {}
+            local exhausted=false
+            local function nextServer()
+                while #pool==0 and not exhausted and page<5 and active() do
+                page=page+1
                 message="Checking public servers, page "..page
                 local url="https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
                 if cursor then url=url.."&cursor="..Http:UrlEncode(cursor) end
                 local data=httpPage(url,active)
                 if not data or not active() then return end
                 for _, server in ipairs(data.data) do
-                    if type(server.id)=="string" and server.id~=game.JobId and not visited[server.id]
+                    if type(server.id)=="string" and server.id~="" and server.id~=game.JobId
+                        and not visited[server.id] and not seen[server.id]
                         and type(server.playing)=="number" and type(server.maxPlayers)=="number"
-                        and server.playing<server.maxPlayers then chosen=server.id; break end
+                        and server.playing<server.maxPlayers then
+                        seen[server.id]=true
+                        table.insert(pool,server.id)
+                    end
                 end
-                if chosen then break end
+                -- Shuffle each page so every search doesn't start at the same listed server.
+                for i=#pool,2,-1 do
+                    local j=math.random(i)
+                    pool[i],pool[j]=pool[j],pool[i]
+                end
                 cursor=data.nextPageCursor
-                if type(cursor)~="string" or cursor=="" then break end
-                task.wait(2)
+                exhausted=type(cursor)~="string" or cursor=="" or cursors[cursor]==true
+                if not exhausted then cursors[cursor]=true end
+                if #pool==0 and not exhausted and page<5 then task.wait(2) end
+                end
+                return table.remove(pool)
             end
+            while active() and attempts<8 do
+            local chosen=nextServer()
             if not active() then return end
-            if not chosen then error("No unvisited open server in the pages checked") end
+            if not chosen then error("No more unvisited open servers in the pages checked. Try again later.") end
             if not safelyScan() or #found>0 or not active() then message="Hop stopped by new scan."; return end
             if canResume and not queued then
                 local queuedCode=string.format(
@@ -353,15 +384,32 @@ local function setup()
                 queued=true
             end
             visited[chosen]=os.time(); saveVisited()
+            attempts=attempts+1
             failedTeleport=false
-            message=canResume and "Joining another server..." or "Joining. Rerun this script after arriving."
+            targetServer=chosen
+            message="Joining server "..attempts.."/8 ("..chosen:sub(1,8)..")..."
+                ..(not canResume and " Rerun script after arrival." or "")
             -- Deprecated client API; failure is reported visibly.
-            TP:TeleportToPlaceInstance(game.PlaceId,chosen,player)
+            local joined,joinError=pcall(function() TP:TeleportToPlaceInstance(game.PlaceId,chosen,player) end)
+            if not joined then failedTeleport=true; message="Join failed: "..tostring(joinError):sub(1,100) end
             local timeout=os.clock()+25
             while active() and not failedTeleport and os.clock()<timeout do task.wait(0.25) end
-            if active() then error(failedTeleport and message or "Teleport timed out") end
+            targetServer=nil
+            if not active() then return end
+            local reason=failedTeleport and message or "Join timed out"
+            if attempts>=8 then error("8 different servers failed. Last result: "..reason) end
+            -- Pace retries and recheck cancellation/fruit detection before selecting again.
+            for remaining=5,1,-1 do
+                if not active() then return end
+                if not safelyScan() or #found>0 then message="Fruit found or scanner error; hopping stopped."; return end
+                message=reason..". Trying a different server in "..remaining.."s."
+                task.wait(1)
+            end
+            end
         end)
+        targetServer=nil
         busy=false
+        hopButton.Text="Hop once"
         if active() then
             nextHop=os.clock()+60
             retryAfter=nextHop
@@ -374,7 +422,11 @@ local function setup()
         else setAuto(true); nextHop=os.clock()+40; message="Auto search started" end
     end))
     table.insert(connections,hopButton.Activated:Connect(function()
-        if busy then return end
+        if busy then
+            setAuto(false)
+            message="Hop retries cancelled. A join already sent may still finish."
+            return
+        end
         task.spawn(hop)
     end))
     table.insert(connections,scanButton.Activated:Connect(function()
