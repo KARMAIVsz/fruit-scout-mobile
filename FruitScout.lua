@@ -1,4 +1,4 @@
--- FRUIT SCOUT MOBILE v6. Paste this entire file into the executor editor.
+-- FRUIT SCOUT MOBILE v7. Paste this entire file into the executor editor.
 -- Hide/reopen with the floating Scout button. Drag the title or floating button.
 -- Scans loaded fruit candidates. Auto hop starts only when you tap its button.
 -- The bundled source is compiled locally; there are no remote code downloads.
@@ -39,8 +39,9 @@ local function create(class, props, target)
     return obj
 end
 local gui = create("ScreenGui", {Name="FruitScout", ResetOnSpawn=false, DisplayOrder=1000}, parent)
-local panel = create("Frame", {Name="ScoutWindow", Active=true, Visible=true,
-    Size=UDim2.fromOffset(300, 415), Position=UDim2.fromOffset(12, 54),
+local panel = create("ScrollingFrame", {Name="ScoutWindow", Active=true, Visible=true,
+    Size=UDim2.fromOffset(300, 530), Position=UDim2.fromOffset(12, 54),
+    CanvasSize=UDim2.fromOffset(0,530), ScrollBarThickness=4, ScrollingDirection=Enum.ScrollingDirection.Y,
     BackgroundColor3=Color3.fromRGB(22, 26, 36), BorderSizePixel=0}, gui)
 create("UICorner", {CornerRadius=UDim.new(0, 12)}, panel)
 local scale = create("UIScale", {Scale=1}, panel)
@@ -49,7 +50,8 @@ local function fitPhone()
     local camera=workspace.CurrentCamera
     if camera then
         local size=camera.ViewportSize
-        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300,(size.Y-80)/415))
+        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300))
+        panel.Size=UDim2.fromOffset(300,math.min(530,math.max(100,(size.Y-80)/scale.Scale)))
     end
     clampUI()
 end
@@ -60,7 +62,7 @@ local function text(value, y, h, size)
         Font=Enum.Font.Gotham, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
         TextYAlignment=Enum.TextYAlignment.Top}, panel)
 end
-local titleBar = text("FRUIT SCOUT v6  -  drag to move", 8, 32, 15)
+local titleBar = text("FRUIT SCOUT v7  -  drag to move", 8, 32, 15)
 titleBar.Name = "DragHandle"
 titleBar.Active = true
 local status = text("Script started. Preparing scanner...", 43, 46, 14)
@@ -83,8 +85,14 @@ local scanButton = button("Scan now", 12, 248, 135)
 local closeButton = button("Hide", 153, 248, 135)
 local fruitButton = button("Teleport to fruit", 12, 289, 135)
 local storeButton = button("Auto store: OFF", 153, 289, 135)
-local chestButton = button("Teleport to chest", 12, 330, 276)
-local storeStatus = text("Tap a fruit to select it. Chest teleport targets the nearest loaded chest.", 372, 34, 11)
+local chestButton = button("Tween to chest", 12, 330, 135)
+local collectButton = button("Auto chest: OFF", 153, 330, 135)
+local stopMoveButton = button("Stop travel", 12, 371, 135)
+local speedButton = button("Speed: 120", 153, 371, 135)
+local factoryStatus = text("Factory: checking sea...", 413, 32, 12)
+factoryStatus.Name="FactoryStatus"
+local syncFactoryButton = button("Factory ended now: sync timer", 12, 451, 276)
+local storeStatus = text("Chest travel checks loaded paths. Stop travel cancels collection.", 493, 32, 11)
 storeStatus.Name = "StorageStatus"
 local launcher = create("TextButton", {Name="ScoutToggle", Text="Hide Scout", Active=true,
     Size=UDim2.fromOffset(124,36), Position=UDim2.fromOffset(12,8),
@@ -516,14 +524,259 @@ local function setup()
             return handle and handle.Position
         end,fruitButton,"Teleport to fruit",identity(target),"Touch it to pick it up.")
     end))
-    table.insert(connections,chestButton.Activated:Connect(function()
-        if moving or stopped then return end
-        if busy then message="Cancel the server hop before teleporting to a chest."; return end
-        if not safelyScan() then return end
-        local target=chests[1]
-        if not target then message="No loaded chest found nearby. Explore to load more of the map."; return end
-        moveToObject(target.object,chestPosition,chestButton,"Teleport to chest","the nearest chest","Touch it to collect.")
+    local Tweens=game:GetService("TweenService")
+    local collecting, chestRun, activeTween, travelSpeed=false,0,nil,120
+    local chestAfter=setmetatable({}, {__mode="k"})
+    local function cancelChest()
+        collecting=false
+        chestRun=chestRun+1
+        if activeTween then pcall(function() activeTween:Cancel() end); activeTween=nil end
+        collectButton.Text="Auto chest: OFF"
+    end
+    local previousClose=closeAction
+    closeAction=function() cancelChest(); previousClose() end
+    table.insert(connections,stopMoveButton.Activated:Connect(function()
+        cancelChest()
+        message="Chest travel stopped."
+        status.Text=message
     end))
+    table.insert(connections,speedButton.Activated:Connect(function()
+        travelSpeed=travelSpeed==120 and 180 or (travelSpeed==180 and 80 or 120)
+        speedButton.Text="Speed: "..travelSpeed
+    end))
+    local function chestTravel(obj,epoch)
+        local character=player.Character
+        local root=character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+        if not root or not humanoid or humanoid.Health<=0 then return false,"Character unavailable; collection paused.",true end
+        local function active()
+            return not stopped and chestRun==epoch and player.Character==character
+                and root.Parent==character and humanoid.Health>0
+        end
+        local params=RaycastParams.new()
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances={character,obj}
+        params.IgnoreWater=false
+        params.RespectCanCollide=true
+        local function clear(a,b)
+            return (b-a).Magnitude<0.1 or workspace:Raycast(a,b-a,params)==nil
+        end
+        local function leg(goal)
+            if not active() then return false,"Travel cancelled.",true end
+            if not chestPosition(obj) then return false,"Target disappeared; rescanning." end
+            if not clear(root.Position,goal) then return false,"Path blocked; skipping this chest." end
+            local duration=math.max(0.15,(root.Position-goal).Magnitude/travelSpeed)
+            local tween=Tweens:Create(root,TweenInfo.new(duration,Enum.EasingStyle.Linear),{CFrame=CFrame.new(goal)})
+            activeTween=tween
+            tween:Play()
+            local deadline=os.clock()+duration+3
+            while tween.PlaybackState==Enum.PlaybackState.Playing and os.clock()<deadline do
+                if not active() then tween:Cancel(); return false,"Travel cancelled.",true end
+                if not chestPosition(obj) then tween:Cancel(); return false,"Target disappeared; rescanning." end
+                -- Streaming can reveal a wall during a long journey.
+                if not clear(root.Position,goal) then tween:Cancel(); return false,"New obstacle detected; skipping chest." end
+                task.wait(0.1)
+            end
+            if tween.PlaybackState~=Enum.PlaybackState.Completed then tween:Cancel(); return false,"Travel interrupted or timed out." end
+            activeTween=nil
+            if not active() then return false,"Travel cancelled.",true end
+            task.wait(0.2)
+            if not active() then return false,"Travel cancelled.",true end
+            if (root.Position-goal).Magnitude>12 then return false,"Movement corrected by game; collection paused.",true end
+            return true
+        end
+        local position=chestPosition(obj)
+        if not position then return false,"Chest is no longer loaded." end
+        local destination=position+Vector3.new(0,3,0)
+        local origin=root.Position
+        local route={destination}
+        if (destination-origin).Magnitude>200 or not clear(origin,destination) then
+            route=nil
+            for _,height in ipairs({60,120,220}) do
+                local y=math.max(origin.Y,destination.Y)+height
+                local up=Vector3.new(origin.X,y,origin.Z)
+                local across=Vector3.new(destination.X,y,destination.Z)
+                if clear(origin,up) and clear(up,across) and clear(across,destination) then
+                    route={up,across,destination}; break
+                end
+            end
+            if not route then return false,"No clear loaded route; skipping enclosed chest." end
+        end
+        for _,goal in ipairs(route) do
+            message="Travelling to chest ("..math.floor((root.Position-destination).Magnitude).." studs)."
+            local ok,why,fatal=leg(goal)
+            if not ok then return false,why,fatal end
+        end
+        -- Let normal character contact collect it. Never claim a reward from proximity alone.
+        for attempt=1,2 do
+            local deadline=os.clock()+2
+            while os.clock()<deadline do
+                if not active() then return false,"Travel cancelled.",true end
+                if (root.Position-destination).Magnitude>18 then return false,"Movement corrected by game; collection paused.",true end
+                if not chestPosition(obj) then return true,"Chest cleared nearby; check Beli for the reward." end
+                task.wait(0.15)
+            end
+            if attempt==1 then
+                local ok,why,fatal=leg(position+Vector3.new(2,2,0))
+                if not ok then return false,why,fatal end
+                ok,why,fatal=leg(destination)
+                if not ok then return false,why,fatal end
+            end
+        end
+        return false,"Pickup unconfirmed; skipping this chest for 60 seconds."
+    end
+    local function runChests(continuous)
+        if moving or stopped then return end
+        if busy then message="Cancel the server hop before chest travel."; return end
+        if not Tweens then message="TweenService is unavailable."; return end
+        setAuto(false)
+        moving=true
+        collecting=continuous
+        chestRun=chestRun+1
+        local epoch=chestRun
+        collectButton.Text=collecting and "Auto chest: ON" or "Auto chest: OFF"
+        chestButton.Text="Travelling..."
+        task.spawn(function()
+            local ok,err=pcall(function()
+                repeat
+                    if stopped or epoch~=chestRun then break end
+                    if not safelyScan() then break end
+                    local target
+                    for _,chest in ipairs(chests) do
+                        if os.clock()>=(chestAfter[chest.object] or 0) then target=chest.object; break end
+                    end
+                    if not target then
+                        message="No ready loaded chest. Explore to load more islands."
+                        if not continuous then break end
+                        task.wait(2)
+                    else
+                        local cleared,why,fatal=chestTravel(target,epoch)
+                        if epoch~=chestRun or stopped then break end
+                        message=why
+                        chestAfter[target]=os.clock()+(cleared and 10 or 60)
+                        if fatal then break end
+                        task.wait(0.5)
+                    end
+                until not continuous
+            end)
+            if activeTween then pcall(function() activeTween:Cancel() end); activeTween=nil end
+            collecting=false
+            moving=false
+            if stopped then return end
+            collectButton.Text="Auto chest: OFF"
+            chestButton.Text="Tween to chest"
+            if not ok then message="Chest travel stopped: "..tostring(err):sub(1,130) end
+            status.Text=message
+        end)
+    end
+    table.insert(connections,chestButton.Activated:Connect(function() runChests(false) end))
+    table.insert(connections,collectButton.Activated:Connect(function()
+        if collecting then cancelChest(); message="Auto chest stopped." else runChests(true) end
+    end))
+    -- Factory timers are estimates anchored to an observed event in THIS server.
+    -- Joining time and workspace.DistributedGameTime are not raid schedules.
+    local secondSea=game.PlaceId==4442272183
+    local factory={job=game.JobId}
+    local savedFactory=env.FruitScoutFactory
+    if type(savedFactory)~="table" then
+        local raw=read("Factory")
+        if type(raw)=="string" then
+            local ok,value=pcall(function() return Http:JSONDecode(raw) end)
+            if ok then savedFactory=value end
+        end
+    end
+    if type(savedFactory)=="table" and savedFactory.job==game.JobId then
+        for _,field in ipairs({"nextAt","openingAt"}) do
+            local value=savedFactory[field]
+            if type(value)=="number" and value==value and value>os.time() and value<=os.time()+5400 then factory[field]=value end
+        end
+    end
+    local function saveFactory()
+        env.FruitScoutFactory=factory
+        save("Factory",Http:JSONEncode(factory))
+    end
+    local function factoryEnded()
+        factory.nextAt=os.time()+5400
+        factory.openingAt=nil
+        saveFactory()
+    end
+    table.insert(connections,syncFactoryButton.Activated:Connect(function()
+        if not secondSea then return end
+        factoryEnded()
+        message="Factory estimate synced to your report that the raid just ended."
+    end))
+    local notificationSeen=setmetatable({}, {__mode="k"})
+    local notificationReady=false
+    local trackedCore, coreDeath=nil,nil
+    local closeWithTravel=closeAction
+    closeAction=function()
+        if coreDeath then coreDeath:Disconnect() end
+        closeWithTravel()
+    end
+    local function minutesSeconds(seconds)
+        seconds=math.max(0,math.ceil(seconds))
+        return string.format("%02d:%02d",math.floor(seconds/60),seconds%60)
+    end
+    local function updateFactory()
+        if not secondSea then factoryStatus.Text="Factory: Second Sea only."; return end
+        -- Ignore chat and Scout's own labels. Only a changing game notification counts.
+        for _,obj in ipairs(parent:GetDescendants()) do
+            if obj:IsA("TextLabel") and not obj:IsDescendantOf(gui) then
+                local ancestor=obj.Parent
+                local notification,chat,visible=false,false,obj.Visible
+                while ancestor and ancestor~=parent do
+                    local name=ancestor.Name:lower()
+                    if name:find("notification",1,true) then notification=true end
+                    if name:find("chat",1,true) then chat=true end
+                    if ancestor:IsA("GuiObject") and not ancestor.Visible then visible=false end
+                    if ancestor:IsA("ScreenGui") and not ancestor.Enabled then visible=false end
+                    ancestor=ancestor.Parent
+                end
+                local value=obj.Text
+                if notificationReady and notification and not chat and visible and notificationSeen[obj]~=value
+                    and value:lower():find("we are breaching the factory in 30 seconds",1,true) then
+                    factory.openingAt=os.time()+30
+                    factory.nextAt=nil
+                    saveFactory()
+                end
+                notificationSeen[obj]=value
+            end
+        end
+        notificationReady=true
+        local enemies=workspace:FindFirstChild("Enemies")
+        local core=enemies and enemies:FindFirstChild("Core")
+        local humanoid=core and core:FindFirstChildOfClass("Humanoid")
+        if core~=trackedCore then
+            if coreDeath then coreDeath:Disconnect(); coreDeath=nil end
+            trackedCore=core
+            if humanoid and humanoid.Health>0 then
+                coreDeath=humanoid.Died:Connect(function()
+                    if not stopped then factoryEnded() end
+                end)
+            end
+        end
+        if humanoid and humanoid.Health>0 then
+            factoryStatus.Text="Factory: ACTIVE (Core detected)."
+        elseif factory.openingAt then
+            local remaining=factory.openingAt-os.time()
+            factoryStatus.Text=remaining>0 and "Factory opens in ~"..minutesSeconds(remaining)
+                or "Factory: expected active; awaiting end sync."
+            if remaining < -330 then factory.openingAt=nil; saveFactory() end
+        elseif factory.nextAt then
+            local remaining=factory.nextAt-os.time()
+            factoryStatus.Text=remaining>0 and "Factory next warning: ~"..minutesSeconds(remaining).." (estimate)"
+                or "Factory estimate elapsed; awaiting a game signal."
+        else
+            factoryStatus.Text="Factory: time unknown in this server. Sync after a raid ends."
+        end
+    end
+    task.spawn(function()
+        while not stopped do
+            local ok=pcall(updateFactory)
+            if not ok then factoryStatus.Text="Factory: signal unavailable; manual sync supported." end
+            task.wait(1)
+        end
+    end)
     local autoStore=read("AutoStore")==true
     local storeAfter=setmetatable({}, {__mode="k"})
     local function setStore(value)
@@ -724,7 +977,8 @@ local function setup()
         end
     end
     table.insert(connections,autoButton.Activated:Connect(function()
-        if auto then setAuto(false); message="Auto hopping paused. Scanner stays active."
+        if moving then message="Stop chest travel before enabling server hopping."
+        elseif auto then setAuto(false); message="Auto hopping paused. Scanner stays active."
         elseif not canRequest or not canResume then message="Auto hop unavailable. Check HTTP/Restart above. Hop once needs HTTP."
         else setAuto(true); nextHop=os.clock()+40; message="Auto search started" end
     end))
