@@ -1,4 +1,4 @@
--- FRUIT SCOUT MOBILE v4. Paste this entire file into the executor editor.
+-- FRUIT SCOUT MOBILE v5. Paste this entire file into the executor editor.
 -- Hide/reopen with the floating Scout button. Drag the title or floating button.
 -- Scans loaded fruit candidates. Auto hop starts only when you tap its button.
 -- The bundled source is compiled locally; there are no remote code downloads.
@@ -40,7 +40,7 @@ local function create(class, props, target)
 end
 local gui = create("ScreenGui", {Name="FruitScout", ResetOnSpawn=false, DisplayOrder=1000}, parent)
 local panel = create("Frame", {Name="ScoutWindow", Active=true, Visible=true,
-    Size=UDim2.fromOffset(300, 288), Position=UDim2.fromOffset(12, 54),
+    Size=UDim2.fromOffset(300, 374), Position=UDim2.fromOffset(12, 54),
     BackgroundColor3=Color3.fromRGB(22, 26, 36), BorderSizePixel=0}, gui)
 create("UICorner", {CornerRadius=UDim.new(0, 12)}, panel)
 local scale = create("UIScale", {Scale=1}, panel)
@@ -49,7 +49,7 @@ local function fitPhone()
     local camera=workspace.CurrentCamera
     if camera then
         local size=camera.ViewportSize
-        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300,(size.Y-80)/288))
+        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300,(size.Y-80)/374))
     end
     clampUI()
 end
@@ -60,7 +60,7 @@ local function text(value, y, h, size)
         Font=Enum.Font.Gotham, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
         TextYAlignment=Enum.TextYAlignment.Top}, panel)
 end
-local titleBar = text("FRUIT SCOUT v4  -  drag to move", 8, 32, 15)
+local titleBar = text("FRUIT SCOUT v5  -  drag to move", 8, 32, 15)
 titleBar.Name = "DragHandle"
 titleBar.Active = true
 local status = text("Script started. Preparing scanner...", 43, 46, 14)
@@ -75,6 +75,10 @@ local autoButton = button("Auto hop: OFF", 12, 207, 135)
 local hopButton = button("Hop once", 153, 207, 135)
 local scanButton = button("Scan now", 12, 248, 135)
 local closeButton = button("Hide", 153, 248, 135)
+local fruitButton = button("Teleport to fruit", 12, 289, 135)
+local storeButton = button("Auto store: OFF", 153, 289, 135)
+local storeStatus = text("Teleport targets the nearest loaded fruit. Auto store is off.", 331, 34, 11)
+storeStatus.Name = "StorageStatus"
 local launcher = create("TextButton", {Name="ScoutToggle", Text="Hide Scout", Active=true,
     Size=UDim2.fromOffset(124,36), Position=UDim2.fromOffset(12,8),
     BackgroundColor3=Color3.fromRGB(55,78,119), TextColor3=Color3.new(1,1,1),
@@ -230,9 +234,69 @@ local function setup()
         originalClose()
     end
     local scanError = nil
+    local function clean(value)
+        if type(value)~="string" or #value>120 then return nil end
+        value=value:gsub("[%c]",""):match("^%s*(.-)%s*$")
+        if value=="" then return nil end
+        return value
+    end
+    local function repeatedBase(value)
+        if not value or #value%2~=1 then return nil end
+        local mid=(#value+1)/2
+        if value:sub(mid,mid)=="-" and value:sub(1,mid-1)==value:sub(mid+1) then
+            return value:sub(1,mid-1)
+        end
+    end
+    local function displayName(value)
+        value=clean(value)
+        if not value then return nil end
+        value=repeatedBase(value) or value
+        -- Preserve variant information; only strip the literal physical-tool suffix.
+        value=value:gsub(" [Ff]ruit$","")
+        local generic={fruit=true,tool=true,model=true,handle=true,spawned=true}
+        if generic[value:lower()] or value=="" then return nil end
+        return value.." Fruit"
+    end
+    local function identity(obj)
+        local nodes={obj}
+        for _,child in ipairs(obj:GetDescendants()) do
+            if #nodes>=65 then break end
+            table.insert(nodes,child)
+        end
+        -- Prefer canonical metadata over a generic outer Tool/Model named Fruit.
+        for _,node in ipairs(nodes) do
+            local id=clean(node:GetAttribute("OriginalName"))
+            if not id and node.Name=="OriginalName" and node:IsA("StringValue") then id=clean(node.Value) end
+            if id and displayName(id) then return displayName(id),id end
+        end
+        for _,node in ipairs(nodes) do
+            for _,field in ipairs({"FruitName","DisplayName"}) do
+                local value=node:GetAttribute(field)
+                if node.Name==field and node:IsA("StringValue") then value=node.Value end
+                local name=displayName(value)
+                if name then return name,nil end
+            end
+        end
+        for _,node in ipairs(nodes) do
+            local raw=clean(node.Name)
+            if raw and (raw:match(" [Ff]ruit$") or repeatedBase(raw)) then
+                local name=displayName(raw)
+                if name then
+                    local base=raw:gsub(" [Ff]ruit$","")
+                    return name,repeatedBase(raw) and raw or (base.."-"..base)
+                end
+            end
+        end
+        return "Unidentified fruit",nil
+    end
+    local function fruitLike(obj)
+        return obj.Name:lower():find("fruit",1,true)~=nil
+            or repeatedBase(clean(obj.Name))~=nil
+            or repeatedBase(clean(obj:GetAttribute("OriginalName")))~=nil
+    end
     local function candidate(obj)
         if not (obj:IsA("Tool") or obj:IsA("Model")) then return nil end
-        if not obj.Name:lower():find("fruit",1,true) then return nil end
+        if not fruitLike(obj) then return nil end
         local ancestor = obj
         while ancestor and ancestor ~= workspace do
             if ancestor:FindFirstChildOfClass("Humanoid") then return nil end
@@ -243,6 +307,28 @@ local function setup()
         local handle = obj:FindFirstChild("Handle")
         if not handle and obj:IsA("Model") then handle = obj.PrimaryPart end
         if handle and handle:IsA("BasePart") then return handle end
+    end
+    local function ownsTool(tool)
+        local backpack=player:FindFirstChild("Backpack")
+        return tool:IsA("Tool") and tool.Parent~=nil
+            and (tool.Parent==backpack or tool.Parent==player.Character)
+    end
+    local function heldFruits()
+        local list={}
+        local containers={}
+        local backpack=player:FindFirstChild("Backpack")
+        if backpack then table.insert(containers,backpack) end
+        if player.Character then table.insert(containers,player.Character) end
+        for _,container in ipairs(containers) do
+            for _,tool in ipairs(container:GetChildren()) do
+                -- Physical fruit tools have a Handle. Ability tools are excluded.
+                local handle=tool:FindFirstChild("Handle")
+                if tool:IsA("Tool") and fruitLike(tool) and handle and handle:IsA("BasePart") then
+                    table.insert(list,tool)
+                end
+            end
+        end
+        return list
     end
     local found = {}
     local function scan()
@@ -269,7 +355,7 @@ local function setup()
                     Font=Enum.Font.GothamBold, TextSize=14}, billboard)
                 markers[obj] = {gui=billboard,label=label}
             end
-            local name = obj.Name == "Fruit" and "Spawned fruit" or obj.Name
+            local name = identity(obj)
             local distance = fruit.distance < math.huge and tostring(math.floor(fruit.distance)).." studs" or "select a team"
             markers[obj].gui.Adornee = handle
             markers[obj].label.Text = name .. "\n" .. distance
@@ -294,6 +380,114 @@ local function setup()
         if not ok then setAuto(false); showError(err); message="Scanner error; auto hopping disabled." end
         return ok
     end
+    local moving=false
+    table.insert(connections,fruitButton.Activated:Connect(function()
+        if moving or stopped then return end
+        if busy then message="Cancel the server hop before teleporting to a fruit."; return end
+        if not safelyScan() then return end
+        local selected=found[1]
+        if not selected then message="No loaded fruit to teleport to."; return end
+        local character=player.Character
+        local root=character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+        if not root or not humanoid or humanoid.Health<=0 then
+            message="Choose a team and wait for your character."; return
+        end
+        local handle=candidate(selected.object)
+        if not handle or handle~=selected.handle then message="That fruit is no longer available."; return end
+        setAuto(false)
+        moving=true
+        fruitButton.Text="Moving..."
+        task.spawn(function()
+            local name=identity(selected.object)
+            local ok,err=pcall(function()
+                if stopped or player.Character~=character or candidate(selected.object)~=handle then return end
+                -- Move the character, leaving the world fruit for the normal pickup system.
+                character:PivotTo(CFrame.new(handle.Position+Vector3.new(0,3,0)))
+                message="Moved near "..name..". Touch it to pick it up."
+                task.wait(1)
+                if stopped or player.Character~=character then return end
+                if (root.Position-handle.Position).Magnitude>30 then
+                    message="The game moved you back. Teleport to fruit was not accepted."
+                end
+            end)
+            moving=false
+            if stopped then return end
+            fruitButton.Text="Teleport to fruit"
+            if not ok then message="Fruit teleport failed: "..tostring(err):sub(1,130) end
+        end)
+    end))
+    local autoStore=read("AutoStore")==true
+    local storeAfter=setmetatable({}, {__mode="k"})
+    local function setStore(value)
+        autoStore=value
+        save("AutoStore",value)
+        storeButton.Text=value and "Auto store: ON" or "Auto store: OFF"
+    end
+    setStore(autoStore)
+    if autoStore then storeStatus.Text="Auto store enabled for physical fruits in your backpack or hand." end
+    table.insert(connections,storeButton.Activated:Connect(function()
+        setStore(not autoStore)
+        storeStatus.Text=autoStore and "Auto store enabled for physical fruits in your backpack or hand."
+            or "Auto store off. A request already sent may still finish."
+    end))
+    local function storeOne(tool)
+        local name,id=identity(tool)
+        storeAfter[tool]=os.clock()+30
+        if not id then storeStatus.Text="Cannot store "..name..": storage ID is unavailable."; return end
+        local replicated=game:GetService("ReplicatedStorage")
+        local remotes=replicated and replicated:FindFirstChild("Remotes")
+        local remote=remotes and remotes:FindFirstChild("CommF_")
+        if not remote or not remote:IsA("RemoteFunction") then
+            setStore(false)
+            storeStatus.Text="Auto store unavailable: game storage interface not found."
+            return
+        end
+        if stopped or not autoStore or not ownsTool(tool) or env.FruitScoutStorePending then return end
+        local pending={}
+        env.FruitScoutStorePending=pending
+        local done,ok,result=false,false,nil
+        storeStatus.Text="Requesting storage for "..name.."..."
+        task.spawn(function()
+            ok,result=pcall(function()
+                if stopped or not autoStore or not ownsTool(tool) then return "Cancelled before sending" end
+                return remote:InvokeServer("StoreFruit",id,tool)
+            end)
+            done=true
+            if env.FruitScoutStorePending==pending then env.FruitScoutStorePending=nil end
+        end)
+        local deadline=os.clock()+12
+        while not done and not stopped and os.clock()<deadline do task.wait(0.2) end
+        if stopped then return end
+        if not done then
+            setStore(false)
+            storeStatus.Text="Storage timed out; auto store paused. The pending request may still finish."
+        elseif not autoStore then
+            return
+        elseif not ok then
+            storeStatus.Text="Storage error: "..tostring(result):sub(1,140)
+        elseif type(result)=="string" and result~="" then
+            storeStatus.Text="Storage: "..result:sub(1,145)
+        elseif result==false then
+            storeStatus.Text="Storage rejected for "..name..". Check inventory capacity."
+        else
+            storeStatus.Text="Storage request finished for "..name..". Check your game inventory."
+        end
+    end
+    task.spawn(function()
+        while not stopped do
+            if autoStore and not env.FruitScoutStorePending and not busy then
+                for _,tool in ipairs(heldFruits()) do
+                    if os.clock()>=(storeAfter[tool] or 0) then
+                        local ok,err=pcall(storeOne,tool)
+                        if not ok then setStore(false); storeStatus.Text="Auto store error: "..tostring(err):sub(1,130) end
+                        break
+                    end
+                end
+            end
+            task.wait(2)
+        end
+    end)
     local function httpPage(url, stillActive)
         local done, response, failure = false, nil, nil
         task.spawn(function()
@@ -324,6 +518,9 @@ local function setup()
     end))
     local function hop()
         if busy or stopped then return end
+        if moving or env.FruitScoutStorePending or #heldFruits()>0 then
+            message="Store your held fruits before hopping."; return
+        end
         if os.clock()<retryAfter then message="Waiting before retrying the server request."; return end
         if not canRequest then message="Delta HTTP request support is unavailable."; return end
         if not safelyScan() or #found>0 then message="Hop stopped: fruit found or scanner error."; return end
@@ -372,6 +569,9 @@ local function setup()
             local chosen=nextServer()
             if not active() then return end
             if not chosen then error("No more unvisited open servers in the pages checked. Try again later.") end
+            if moving or env.FruitScoutStorePending or #heldFruits()>0 then
+                message="Hop stopped: you have an un-stored fruit."; return
+            end
             if not safelyScan() or #found>0 or not active() then message="Hop stopped by new scan."; return end
             if canResume and not queued then
                 local queuedCode=string.format(
@@ -439,7 +639,10 @@ local function setup()
             fitPhone()
             safelyScan()
             if auto and not busy then
-                if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
+                if moving or env.FruitScoutStorePending or #heldFruits()>0 then
+                    nextHop=os.clock()+40
+                    message="Hopping paused: store your held fruits first."
+                elseif not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
                     nextHop=os.clock()+40
                     message="Select a team to continue the search."
                     if type(firesignal)=="function" and os.clock()-lastTeamAttempt>=3 then
