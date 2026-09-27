@@ -1,4 +1,4 @@
--- FRUIT SCOUT MOBILE v5. Paste this entire file into the executor editor.
+-- FRUIT SCOUT MOBILE v6. Paste this entire file into the executor editor.
 -- Hide/reopen with the floating Scout button. Drag the title or floating button.
 -- Scans loaded fruit candidates. Auto hop starts only when you tap its button.
 -- The bundled source is compiled locally; there are no remote code downloads.
@@ -40,7 +40,7 @@ local function create(class, props, target)
 end
 local gui = create("ScreenGui", {Name="FruitScout", ResetOnSpawn=false, DisplayOrder=1000}, parent)
 local panel = create("Frame", {Name="ScoutWindow", Active=true, Visible=true,
-    Size=UDim2.fromOffset(300, 374), Position=UDim2.fromOffset(12, 54),
+    Size=UDim2.fromOffset(300, 415), Position=UDim2.fromOffset(12, 54),
     BackgroundColor3=Color3.fromRGB(22, 26, 36), BorderSizePixel=0}, gui)
 create("UICorner", {CornerRadius=UDim.new(0, 12)}, panel)
 local scale = create("UIScale", {Scale=1}, panel)
@@ -49,7 +49,7 @@ local function fitPhone()
     local camera=workspace.CurrentCamera
     if camera then
         local size=camera.ViewportSize
-        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300,(size.Y-80)/374))
+        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300,(size.Y-80)/415))
     end
     clampUI()
 end
@@ -60,12 +60,18 @@ local function text(value, y, h, size)
         Font=Enum.Font.Gotham, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
         TextYAlignment=Enum.TextYAlignment.Top}, panel)
 end
-local titleBar = text("FRUIT SCOUT v5  -  drag to move", 8, 32, 15)
+local titleBar = text("FRUIT SCOUT v6  -  drag to move", 8, 32, 15)
 titleBar.Name = "DragHandle"
 titleBar.Active = true
 local status = text("Script started. Preparing scanner...", 43, 46, 14)
 local details = text("", 92, 26, 11)
-local list = text("", 123, 79, 13)
+local list = create("ScrollingFrame", {Name="FruitList", Position=UDim2.fromOffset(12,123),
+    Size=UDim2.new(1,-24,0,79), BackgroundTransparency=1, BorderSizePixel=0,
+    ScrollBarThickness=4, CanvasSize=UDim2.fromOffset(0,0),
+    ScrollingDirection=Enum.ScrollingDirection.Y}, panel)
+local emptyList = create("TextLabel", {Name="EmptyFruitList", Text="No loaded fruit candidates found.",
+    Size=UDim2.new(1,-8,0,28), BackgroundTransparency=1, TextColor3=Color3.fromRGB(233,239,249),
+    TextSize=13, TextWrapped=true, Font=Enum.Font.Gotham}, list)
 local function button(value, x, y, width)
     return create("TextButton", {Text=value, Position=UDim2.fromOffset(x,y), Size=UDim2.fromOffset(width,34),
         BackgroundColor3=Color3.fromRGB(55,78,119), TextColor3=Color3.new(1,1,1),
@@ -77,7 +83,8 @@ local scanButton = button("Scan now", 12, 248, 135)
 local closeButton = button("Hide", 153, 248, 135)
 local fruitButton = button("Teleport to fruit", 12, 289, 135)
 local storeButton = button("Auto store: OFF", 153, 289, 135)
-local storeStatus = text("Teleport targets the nearest loaded fruit. Auto store is off.", 331, 34, 11)
+local chestButton = button("Teleport to chest", 12, 330, 276)
+local storeStatus = text("Tap a fruit to select it. Chest teleport targets the nearest loaded chest.", 372, 34, 11)
 storeStatus.Name = "StorageStatus"
 local launcher = create("TextButton", {Name="ScoutToggle", Text="Hide Scout", Active=true,
     Size=UDim2.fromOffset(124,36), Position=UDim2.fromOffset(12,8),
@@ -85,7 +92,7 @@ local launcher = create("TextButton", {Name="ScoutToggle", Text="Hide Scout", Ac
     TextSize=14, Font=Enum.Font.GothamBold}, gui)
 create("UICorner", {CornerRadius=UDim.new(0,10)}, launcher)
 local stopped, busy, auto, version = false, false, false, 0
-local connections, markers = {}, {}
+local connections, markers, fruitRows = {}, {}, {}
 local saveView = function() end
 local function moveInside(target,x,y)
     local bounds, size = gui.AbsoluteSize, target.AbsoluteSize
@@ -150,6 +157,7 @@ end))
 local closeAction = function()
     stopped = true
     for _, c in ipairs(connections) do c:Disconnect() end
+    for _, row in pairs(fruitRows) do row.connection:Disconnect() end
     gui:Destroy()
 end
 env.FruitScoutClose = function() closeAction() end
@@ -330,11 +338,67 @@ local function setup()
         end
         return list
     end
-    local found = {}
+    local found, chests, selectedFruit = {}, {}, nil
+    local Collections=game:GetService("CollectionService")
+    local function chestName(obj)
+        local name=obj.Name:lower():gsub("[%s_%-]","")
+        return name:match("^chest%d*$")~=nil or name=="goldchest"
+            or name=="silverchest" or name=="diamondchest"
+    end
+    local function chestPosition(obj)
+        if not (obj:IsA("BasePart") or obj:IsA("Model")) then return nil end
+        local ancestor=obj
+        while ancestor and ancestor~=workspace do
+            if ancestor:GetAttribute("IsDisabled") or ancestor:GetAttribute("Collected")
+                or ancestor:FindFirstChildOfClass("Humanoid") or ancestor:IsA("Tool") then return nil end
+            ancestor=ancestor.Parent
+        end
+        if ancestor~=workspace then return nil end
+        if obj:IsA("BasePart") then return obj.Position end
+        if not obj:FindFirstChildWhichIsA("BasePart",true) then return nil end
+        return obj:GetPivot().Position
+    end
+    local function scanChests(descendants,root)
+        local tagged={}
+        if Collections then
+            local ok,result=pcall(function() return Collections:GetTagged("_ChestTagged") end)
+            if ok then for _,obj in ipairs(result) do tagged[obj]=true end end
+        end
+        local seen, fresh={},{}
+        for _,obj in ipairs(descendants) do
+            if tagged[obj] or chestName(obj) then
+                -- Collapse a named/tagged chest model and its parts to one target.
+                local target=obj
+                local ancestor=obj.Parent
+                while ancestor and ancestor~=workspace do
+                    if ancestor:IsA("Model") and (tagged[ancestor] or chestName(ancestor)) then target=ancestor end
+                    ancestor=ancestor.Parent
+                end
+                if not seen[target] then
+                    seen[target]=true
+                    local position=chestPosition(target)
+                    if position then table.insert(fresh,{object=target,
+                        distance=root and (root.Position-position).Magnitude or math.huge}) end
+                end
+            end
+        end
+        table.sort(fresh,function(a,b) return a.distance<b.distance end)
+        chests=fresh
+    end
+    local function highlightSelection()
+        local chosen=selectedFruit or (found[1] and found[1].object)
+        for obj,row in pairs(fruitRows) do
+            local selected=obj==chosen
+            row.button.Text=(selected and "> " or "  ")..row.caption
+            row.button.BackgroundColor3=selected and Color3.fromRGB(55,92,142) or Color3.fromRGB(32,40,55)
+        end
+    end
     local function scan()
         local fresh, handles, alive = {}, {}, {}
         local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        for _, obj in ipairs(workspace:GetDescendants()) do
+        local descendants=workspace:GetDescendants()
+        scanChests(descendants,root)
+        for _, obj in ipairs(descendants) do
             local handle = candidate(obj)
             if handle and not handles[handle] then
                 handles[handle] = true
@@ -343,7 +407,6 @@ local function setup()
             end
         end
         table.sort(fresh, function(a,b) return a.distance < b.distance end)
-        local lines = {}
         for i, fruit in ipairs(fresh) do
             local obj, handle = fruit.object, fruit.handle
             alive[obj] = true
@@ -359,16 +422,42 @@ local function setup()
             local distance = fruit.distance < math.huge and tostring(math.floor(fruit.distance)).." studs" or "select a team"
             markers[obj].gui.Adornee = handle
             markers[obj].label.Text = name .. "\n" .. distance
-            if i <= 4 then table.insert(lines,name .. " | " .. distance) end
+            if not fruitRows[obj] then
+                local rowButton=create("TextButton", {Name="FruitRow", Size=UDim2.new(1,-8,0,28),
+                    BorderSizePixel=0, TextColor3=Color3.fromRGB(233,239,249),
+                    TextSize=12, Font=Enum.Font.Gotham, TextXAlignment=Enum.TextXAlignment.Left,
+                    TextTruncate=Enum.TextTruncate.AtEnd}, list)
+                local connection=rowButton.Activated:Connect(function()
+                    if stopped then return end
+                    if not candidate(obj) then message="That fruit is no longer available."; return end
+                    selectedFruit=obj
+                    highlightSelection()
+                    message="Selected "..identity(obj)..". Tap Teleport to fruit."
+                    status.Text=message
+                end)
+                fruitRows[obj]={button=rowButton,connection=connection}
+            end
+            local row=fruitRows[obj]
+            row.caption=name.." | "..distance
+            row.button.Position=UDim2.fromOffset(0,(i-1)*30)
         end
         for obj, marker in pairs(markers) do
             if not alive[obj] then marker.gui:Destroy(); markers[obj]=nil end
         end
+        for obj,row in pairs(fruitRows) do
+            if not alive[obj] then row.connection:Disconnect(); row.button:Destroy(); fruitRows[obj]=nil end
+        end
+        if selectedFruit and not alive[selectedFruit] then
+            selectedFruit=nil
+            message="Selected fruit disappeared. The nearest available fruit is highlighted."
+        end
         found = fresh
+        highlightSelection()
         scans = scans+1
-        list.Text = #lines>0 and table.concat(lines,"\n") or "No loaded fruit candidates found."
+        emptyList.Visible=#fresh==0
+        list.CanvasSize=UDim2.fromOffset(0,#fresh*30)
         details.Text = "Scan #"..scans.." | HTTP "..(canRequest and "YES" or "NO")
-            .." | Restart "..(canResume and "YES" or "NO")
+            .." | Restart "..(canResume and "YES" or "NO").."\nFruits: "..#fresh.." | Chests: "..#chests
         if #fresh>0 and auto then
             setAuto(false)
             message = "Fruit found! Hopping stopped. Check the yellow markers."
@@ -381,41 +470,59 @@ local function setup()
         return ok
     end
     local moving=false
-    table.insert(connections,fruitButton.Activated:Connect(function()
+    local function moveToObject(obj,positionFn,control,buttonText,label,pickupText)
         if moving or stopped then return end
-        if busy then message="Cancel the server hop before teleporting to a fruit."; return end
-        if not safelyScan() then return end
-        local selected=found[1]
-        if not selected then message="No loaded fruit to teleport to."; return end
+        if busy then message="Cancel the server hop before moving."; return end
         local character=player.Character
         local root=character and character:FindFirstChild("HumanoidRootPart")
         local humanoid=character and character:FindFirstChildOfClass("Humanoid")
         if not root or not humanoid or humanoid.Health<=0 then
             message="Choose a team and wait for your character."; return
         end
-        local handle=candidate(selected.object)
-        if not handle or handle~=selected.handle then message="That fruit is no longer available."; return end
+        if not positionFn(obj) then message="That target is no longer available."; return end
         setAuto(false)
         moving=true
-        fruitButton.Text="Moving..."
+        control.Text="Moving..."
         task.spawn(function()
-            local name=identity(selected.object)
             local ok,err=pcall(function()
-                if stopped or player.Character~=character or candidate(selected.object)~=handle then return end
-                -- Move the character, leaving the world fruit for the normal pickup system.
-                character:PivotTo(CFrame.new(handle.Position+Vector3.new(0,3,0)))
-                message="Moved near "..name..". Touch it to pick it up."
+                if stopped or player.Character~=character then return end
+                local position=positionFn(obj)
+                if not position then message="That target is no longer available."; return end
+                -- Leave the target in place for the game's normal collection system.
+                character:PivotTo(CFrame.new(position+Vector3.new(0,3,0)))
+                message="Moved near "..label..". "..pickupText
                 task.wait(1)
                 if stopped or player.Character~=character then return end
-                if (root.Position-handle.Position).Magnitude>30 then
-                    message="The game moved you back. Teleport to fruit was not accepted."
+                if (root.Position-position).Magnitude>30 then
+                    message="The game moved you back. Teleport was not accepted."
                 end
             end)
             moving=false
             if stopped then return end
-            fruitButton.Text="Teleport to fruit"
-            if not ok then message="Fruit teleport failed: "..tostring(err):sub(1,130) end
+            control.Text=buttonText
+            if not ok then message="Teleport failed: "..tostring(err):sub(1,130) end
         end)
+    end
+    table.insert(connections,fruitButton.Activated:Connect(function()
+        if moving or stopped then return end
+        if busy then message="Cancel the server hop before teleporting to a fruit."; return end
+        local requested=selectedFruit
+        if not safelyScan() then return end
+        if requested and selectedFruit~=requested then message="Selected fruit is no longer available. Select another."; return end
+        local target=selectedFruit or (found[1] and found[1].object)
+        if not target then message="No loaded fruit to teleport to."; return end
+        moveToObject(target,function(obj)
+            local handle=candidate(obj)
+            return handle and handle.Position
+        end,fruitButton,"Teleport to fruit",identity(target),"Touch it to pick it up.")
+    end))
+    table.insert(connections,chestButton.Activated:Connect(function()
+        if moving or stopped then return end
+        if busy then message="Cancel the server hop before teleporting to a chest."; return end
+        if not safelyScan() then return end
+        local target=chests[1]
+        if not target then message="No loaded chest found nearby. Explore to load more of the map."; return end
+        moveToObject(target.object,chestPosition,chestButton,"Teleport to chest","the nearest chest","Touch it to collect.")
     end))
     local autoStore=read("AutoStore")==true
     local storeAfter=setmetatable({}, {__mode="k"})
