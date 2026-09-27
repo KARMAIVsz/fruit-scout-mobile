@@ -1,5 +1,5 @@
--- FRUIT SCOUT MOBILE v7. Paste this entire file into the executor editor.
--- Hide/reopen with the floating Scout button. Drag the title or floating button.
+-- KARMA v8. Paste this entire file into the executor editor.
+-- Hide/reopen with the floating KARMA button. Drag the title or floating button.
 -- Scans loaded fruit candidates. Auto hop starts only when you tap its button.
 -- The bundled source is compiled locally; there are no remote code downloads.
 local player = game:GetService("Players").LocalPlayer
@@ -19,7 +19,7 @@ message.BackgroundColor3 = Color3.fromRGB(22, 26, 36)
 message.TextColor3 = Color3.new(1, 1, 1)
 message.TextWrapped = true
 message.TextSize = 16
-message.Text = "FRUIT SCOUT: code started. Loading panel..."
+message.Text = "KARMA: code started. Loading panel..."
 message.Parent = boot
 local SOURCE = [====[
 local SOURCE, RESUMED = ...
@@ -38,70 +38,130 @@ local function create(class, props, target)
     obj.Parent = target
     return obj
 end
+-- Self-contained KARMA interface; no external UI library is executed.
+local theme={background=Color3.fromRGB(18,18,23),surface=Color3.fromRGB(29,29,36),
+    muted=Color3.fromRGB(153,153,168),text=Color3.fromRGB(240,240,246),accent=Color3.fromRGB(221,53,74)}
+local stopped, busy, auto, version = false, false, false, 0
+local connections, markers, fruitRows = {}, {}, {}
+local saveView = function() end
 local gui = create("ScreenGui", {Name="FruitScout", ResetOnSpawn=false, DisplayOrder=1000}, parent)
-local panel = create("ScrollingFrame", {Name="ScoutWindow", Active=true, Visible=true,
-    Size=UDim2.fromOffset(300, 530), Position=UDim2.fromOffset(12, 54),
-    CanvasSize=UDim2.fromOffset(0,530), ScrollBarThickness=4, ScrollingDirection=Enum.ScrollingDirection.Y,
-    BackgroundColor3=Color3.fromRGB(22, 26, 36), BorderSizePixel=0}, gui)
-create("UICorner", {CornerRadius=UDim.new(0, 12)}, panel)
+local panel = create("Frame", {Name="ScoutWindow", Active=true, Visible=true,
+    Size=UDim2.fromOffset(540,390), Position=UDim2.fromOffset(12,54),
+    BackgroundColor3=theme.background, BorderSizePixel=0, ClipsDescendants=true}, gui)
+create("UICorner", {CornerRadius=UDim.new(0,12)}, panel)
+create("UIStroke", {Color=Color3.fromRGB(55,41,49),Thickness=1}, panel)
 local scale = create("UIScale", {Scale=1}, panel)
-local clampUI = function() end
+local function text(value,y,h,size,target)
+    return create("TextLabel", {Text=value,Position=UDim2.fromOffset(12,y),Size=UDim2.new(1,-24,0,h),
+        BackgroundTransparency=1,TextColor3=theme.text,TextSize=size or 13,Font=Enum.Font.Gotham,
+        TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top},target or panel)
+end
+local titleBar=text("KARMA",13,29,22)
+titleBar.Name="DragHandle"
+titleBar.Font=Enum.Font.GothamBold
+titleBar.TextColor3=theme.accent
+titleBar.Active=true
+titleBar.Size=UDim2.new(1,-100,0,38)
+local subtitle=text("BLOX FRUITS  /  v8",43,16,10)
+subtitle.TextColor3=theme.muted
+local status=text("Preparing scanner...",0,37,11)
+status.Name="KarmaStatus"
+status.Position=UDim2.new(0,12,1,-43)
+status.TextColor3=theme.muted
+local sidebar=create("ScrollingFrame",{Name="KarmaSidebar",Position=UDim2.fromOffset(8,72),
+    Size=UDim2.new(0,104,1,-124),BackgroundTransparency=1,BorderSizePixel=0,
+    CanvasSize=UDim2.fromOffset(0,184),ScrollBarThickness=2,ScrollBarImageColor3=theme.accent,
+    ScrollingDirection=Enum.ScrollingDirection.Y},panel)
+local pages,tabButtons={},{}
+local activeTab="Fruits"
+for i,name in ipairs({"Fruits","Chests","Factory","Servers"}) do
+    local page=create("ScrollingFrame",{Name="KarmaPage"..name,Position=UDim2.fromOffset(120,72),
+        Size=UDim2.new(1,-132,1,-124),BackgroundTransparency=1,BorderSizePixel=0,
+        CanvasSize=UDim2.fromOffset(0,name=="Fruits" and 390 or 330),ScrollBarThickness=3,
+        ScrollBarImageColor3=theme.accent,ScrollingDirection=Enum.ScrollingDirection.Y,Visible=false},panel)
+    pages[name]=page
+    local tabButton=create("TextButton",{Name="KarmaTab"..name,Text=name,Position=UDim2.fromOffset(0,(i-1)*46),
+        Size=UDim2.new(1,0,0,40),BackgroundColor3=theme.surface,BorderSizePixel=0,
+        TextColor3=theme.muted,TextSize=13,Font=Enum.Font.GothamBold},sidebar)
+    create("UICorner",{CornerRadius=UDim.new(0,7)},tabButton)
+    tabButtons[name]=tabButton
+    local heading=text(name:upper(),0,26,13,page)
+    heading.Font=Enum.Font.GothamBold
+end
+local function selectTab(name)
+    if not pages[name] then return end
+    activeTab=name
+    for key,page in pairs(pages) do
+        page.Visible=key==name
+        tabButtons[key].BackgroundColor3=key==name and theme.accent or theme.surface
+        tabButtons[key].TextColor3=key==name and theme.text or theme.muted
+    end
+    saveView()
+end
+for name,tabButton in pairs(tabButtons) do
+    table.insert(connections,tabButton.Activated:Connect(function() selectTab(name) end))
+end
+selectTab("Fruits")
+local function button(value,y,target)
+    local control=create("TextButton",{Text=value,Position=UDim2.fromOffset(8,y),Size=UDim2.new(1,-20,0,40),
+        BackgroundColor3=theme.surface,TextColor3=theme.text,TextSize=13,TextWrapped=true,
+        BorderSizePixel=0,Font=Enum.Font.Gotham},target)
+    create("UICorner",{CornerRadius=UDim.new(0,7)},control)
+    return control
+end
+local list=create("ScrollingFrame",{Name="FruitList",Position=UDim2.fromOffset(8,38),
+    Size=UDim2.new(1,-20,0,130),BackgroundColor3=theme.surface,BorderSizePixel=0,
+    ScrollBarThickness=3,ScrollBarImageColor3=theme.accent,CanvasSize=UDim2.fromOffset(0,0),
+    ScrollingDirection=Enum.ScrollingDirection.Y},pages.Fruits)
+create("UICorner",{CornerRadius=UDim.new(0,7)},list)
+local emptyList=text("No loaded fruit candidates found.",12,58,13,list)
+emptyList.Name="EmptyFruitList"
+local fruitButton=button("Teleport to fruit",180,pages.Fruits)
+local storeButton=button("Auto store: OFF",230,pages.Fruits)
+local storeStatus=text("Select a fruit above. Storage is optional.",284,80,12,pages.Fruits)
+storeStatus.Name="StorageStatus"
+storeStatus.TextColor3=theme.muted
+local chestButton=button("Tween to chest",38,pages.Chests)
+local collectButton=button("Auto chest: OFF",88,pages.Chests)
+local speedButton=button("Speed: 120",138,pages.Chests)
+local stopMoveButton=button("Stop travel",188,pages.Chests)
+stopMoveButton.TextColor3=theme.accent
+text("Loaded chests only. Stop travel cancels collection; hiding keeps it running.",245,76,12,pages.Chests).TextColor3=theme.muted
+local factoryStatus=text("Factory: checking sea...",40,88,14,pages.Factory)
+factoryStatus.Name="FactoryStatus"
+local syncFactoryButton=button("Factory ended now: sync timer",140,pages.Factory)
+text("Timers are saved per server for this session. Sync only after a raid ends. New servers need an observed event.",202,114,12,pages.Factory).TextColor3=theme.muted
+local details=text("",38,60,12,pages.Servers)
+details.TextColor3=theme.muted
+local autoButton=button("Auto hop: OFF",108,pages.Servers)
+local hopButton=button("Hop once",158,pages.Servers)
+local scanButton=button("Scan now",208,pages.Servers)
+text("Hopping pauses while travelling or carrying an unstored fruit.",262,60,12,pages.Servers).TextColor3=theme.muted
+local closeButton=button("Hide",12,panel)
+closeButton.Size=UDim2.fromOffset(54,34)
+closeButton.Position=UDim2.new(1,-66,0,14)
+local launcher=create("TextButton",{Name="ScoutToggle",Text="Hide KARMA",Active=true,
+    Size=UDim2.fromOffset(124,36),Position=UDim2.fromOffset(12,8),BackgroundColor3=theme.accent,
+    TextColor3=theme.text,TextSize=13,Font=Enum.Font.GothamBold,BorderSizePixel=0},gui)
+create("UICorner",{CornerRadius=UDim.new(0,10)},launcher)
+local clampUI=function() end
 local function fitPhone()
     local camera=workspace.CurrentCamera
     if camera then
         local size=camera.ViewportSize
-        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/300))
-        panel.Size=UDim2.fromOffset(300,math.min(530,math.max(100,(size.Y-80)/scale.Scale)))
+        scale.Scale=math.max(0.4,math.min(1,(size.X-24)/320,(size.Y-80)/240))
+        local width=math.min(540,math.max(320,(size.X-24)/scale.Scale))
+        panel.Size=UDim2.fromOffset(width,math.min(390,math.max(240,(size.Y-80)/scale.Scale)))
+        local side=width<420 and 80 or 104
+        sidebar.Size=UDim2.new(0,side,1,-124)
+        for _,page in pairs(pages) do
+            page.Position=UDim2.fromOffset(side+16,72)
+            page.Size=UDim2.new(1,-side-28,1,-124)
+        end
     end
     clampUI()
 end
 fitPhone()
-local function text(value, y, h, size)
-    return create("TextLabel", {Text=value, Position=UDim2.fromOffset(12,y), Size=UDim2.new(1,-24,0,h),
-        BackgroundTransparency=1, TextColor3=Color3.fromRGB(233,239,249), TextSize=size or 13,
-        Font=Enum.Font.Gotham, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
-        TextYAlignment=Enum.TextYAlignment.Top}, panel)
-end
-local titleBar = text("FRUIT SCOUT v7  -  drag to move", 8, 32, 15)
-titleBar.Name = "DragHandle"
-titleBar.Active = true
-local status = text("Script started. Preparing scanner...", 43, 46, 14)
-local details = text("", 92, 26, 11)
-local list = create("ScrollingFrame", {Name="FruitList", Position=UDim2.fromOffset(12,123),
-    Size=UDim2.new(1,-24,0,79), BackgroundTransparency=1, BorderSizePixel=0,
-    ScrollBarThickness=4, CanvasSize=UDim2.fromOffset(0,0),
-    ScrollingDirection=Enum.ScrollingDirection.Y}, panel)
-local emptyList = create("TextLabel", {Name="EmptyFruitList", Text="No loaded fruit candidates found.",
-    Size=UDim2.new(1,-8,0,28), BackgroundTransparency=1, TextColor3=Color3.fromRGB(233,239,249),
-    TextSize=13, TextWrapped=true, Font=Enum.Font.Gotham}, list)
-local function button(value, x, y, width)
-    return create("TextButton", {Text=value, Position=UDim2.fromOffset(x,y), Size=UDim2.fromOffset(width,34),
-        BackgroundColor3=Color3.fromRGB(55,78,119), TextColor3=Color3.new(1,1,1),
-        TextSize=13, Font=Enum.Font.Gotham}, panel)
-end
-local autoButton = button("Auto hop: OFF", 12, 207, 135)
-local hopButton = button("Hop once", 153, 207, 135)
-local scanButton = button("Scan now", 12, 248, 135)
-local closeButton = button("Hide", 153, 248, 135)
-local fruitButton = button("Teleport to fruit", 12, 289, 135)
-local storeButton = button("Auto store: OFF", 153, 289, 135)
-local chestButton = button("Tween to chest", 12, 330, 135)
-local collectButton = button("Auto chest: OFF", 153, 330, 135)
-local stopMoveButton = button("Stop travel", 12, 371, 135)
-local speedButton = button("Speed: 120", 153, 371, 135)
-local factoryStatus = text("Factory: checking sea...", 413, 32, 12)
-factoryStatus.Name="FactoryStatus"
-local syncFactoryButton = button("Factory ended now: sync timer", 12, 451, 276)
-local storeStatus = text("Chest travel checks loaded paths. Stop travel cancels collection.", 493, 32, 11)
-storeStatus.Name = "StorageStatus"
-local launcher = create("TextButton", {Name="ScoutToggle", Text="Hide Scout", Active=true,
-    Size=UDim2.fromOffset(124,36), Position=UDim2.fromOffset(12,8),
-    BackgroundColor3=Color3.fromRGB(55,78,119), TextColor3=Color3.new(1,1,1),
-    TextSize=14, Font=Enum.Font.GothamBold}, gui)
-create("UICorner", {CornerRadius=UDim.new(0,10)}, launcher)
-local stopped, busy, auto, version = false, false, false, 0
-local connections, markers, fruitRows = {}, {}, {}
-local saveView = function() end
 local function moveInside(target,x,y)
     local bounds, size = gui.AbsoluteSize, target.AbsoluteSize
     if bounds.X<=0 or bounds.Y<=0 then return end
@@ -116,7 +176,7 @@ clampUI = function()
 end
 local function setVisible(value)
     panel.Visible=value
-    launcher.Text=value and "Hide Scout" or "Open Scout"
+    launcher.Text=value and "Hide KARMA" or "Open KARMA"
     saveView()
 end
 local Input=game:GetService("UserInputService")
@@ -176,7 +236,7 @@ local function showError(err)
     version = version + 1
     autoButton.Text = "Auto hop: OFF"
     status.Text = "Error: " .. tostring(err):sub(1,180)
-    warn("Fruit Scout: " .. tostring(err))
+    warn("KARMA: " .. tostring(err))
 end
 
 local function setup()
@@ -195,7 +255,7 @@ local function setup()
     saveView=function()
         save("View",Http:JSONEncode({visible=panel.Visible,
             x=panel.Position.X.Offset,y=panel.Position.Y.Offset,
-            buttonX=launcher.Position.X.Offset,buttonY=launcher.Position.Y.Offset}))
+            buttonX=launcher.Position.X.Offset,buttonY=launcher.Position.Y.Offset,tab=activeTab}))
     end
     local storedView=read("View")
     if type(storedView)=="string" then
@@ -207,6 +267,7 @@ local function setup()
             end
             panel.Position=UDim2.fromOffset(numberOr(view.x,12),numberOr(view.y,54))
             launcher.Position=UDim2.fromOffset(numberOr(view.buttonX,12),numberOr(view.buttonY,8))
+            selectTab(view.tab or "Fruits")
             setVisible(view.visible~=false)
         end
     end
@@ -242,6 +303,7 @@ local function setup()
         version = version + 1
         save("Auto", value)
         autoButton.Text = value and "Auto hop: ON" or "Auto hop: OFF"
+        autoButton.BackgroundColor3=value and theme.accent or theme.surface
     end
     local originalClose = closeAction
     closeAction = function()
@@ -398,7 +460,7 @@ local function setup()
         for obj,row in pairs(fruitRows) do
             local selected=obj==chosen
             row.button.Text=(selected and "> " or "  ")..row.caption
-            row.button.BackgroundColor3=selected and Color3.fromRGB(55,92,142) or Color3.fromRGB(32,40,55)
+            row.button.BackgroundColor3=selected and theme.accent or theme.surface
         end
     end
     local function scan()
@@ -532,6 +594,7 @@ local function setup()
         chestRun=chestRun+1
         if activeTween then pcall(function() activeTween:Cancel() end); activeTween=nil end
         collectButton.Text="Auto chest: OFF"
+        collectButton.BackgroundColor3=theme.surface
     end
     local previousClose=closeAction
     closeAction=function() cancelChest(); previousClose() end
@@ -635,6 +698,7 @@ local function setup()
         chestRun=chestRun+1
         local epoch=chestRun
         collectButton.Text=collecting and "Auto chest: ON" or "Auto chest: OFF"
+        collectButton.BackgroundColor3=collecting and theme.accent or theme.surface
         chestButton.Text="Travelling..."
         task.spawn(function()
             local ok,err=pcall(function()
@@ -664,6 +728,7 @@ local function setup()
             moving=false
             if stopped then return end
             collectButton.Text="Auto chest: OFF"
+        collectButton.BackgroundColor3=theme.surface
             chestButton.Text="Tween to chest"
             if not ok then message="Chest travel stopped: "..tostring(err):sub(1,130) end
             status.Text=message
@@ -676,33 +741,75 @@ local function setup()
     -- Factory timers are estimates anchored to an observed event in THIS server.
     -- Joining time and workspace.DistributedGameTime are not raid schedules.
     local secondSea=game.PlaceId==4442272183
-    local factory={job=game.JobId}
-    local savedFactory=env.FruitScoutFactory
-    if type(savedFactory)~="table" then
-        local raw=read("Factory")
-        if type(raw)=="string" then
-            local ok,value=pcall(function() return Http:JSONDecode(raw) end)
-            if ok then savedFactory=value end
+    local factoryServers={}
+    local kinds={manual=true,core=true,success=true,failure=true,warning=true,active=true,legacy=true}
+    local function finite(value)
+        return type(value)=="number" and value==value and math.abs(value)<1e12
+    end
+    local function mergeFactory(job,record)
+        if type(job)~="string" or job=="" or #job>128 or type(record)~="table" then return end
+        local at=record.observedAt
+        if not finite(at) or at>os.time()+5 or os.time()-at>21600 then return end
+        local fresh={job=job,observedAt=at,kind=kinds[record.kind] and record.kind or "legacy"}
+        for field,duration in pairs({nextAt=5400,openingAt=30,activeUntil=300}) do
+            local value=record[field]
+            if finite(value) and math.abs(value-at-duration)<2 then fresh[field]=value end
+        end
+        if not fresh.nextAt and not fresh.openingAt and not fresh.activeUntil then return end
+        local previous=factoryServers[job]
+        if not previous or fresh.observedAt>previous.observedAt then factoryServers[job]=fresh end
+    end
+    local rawServers=read("FactoryServersV8")
+    if type(rawServers)=="string" then
+        local ok,records=pcall(function() return Http:JSONDecode(rawServers) end)
+        if ok and type(records)=="table" then for job,record in pairs(records) do mergeFactory(job,record) end end
+    end
+    if type(env.FruitScoutFactoryServers)=="table" then
+        for job,record in pairs(env.FruitScoutFactoryServers) do mergeFactory(job,record) end
+    end
+    -- Migrate a valid v7 observation without replacing a newer multi-server entry.
+    local function migrateFactory(record)
+        if type(record)~="table" then return end
+        if finite(record.nextAt) then
+            mergeFactory(record.job,{nextAt=record.nextAt,observedAt=record.nextAt-5400,kind="legacy"})
+        elseif finite(record.openingAt) then
+            mergeFactory(record.job,{openingAt=record.openingAt,observedAt=record.openingAt-30,kind="warning"})
         end
     end
-    if type(savedFactory)=="table" and savedFactory.job==game.JobId then
-        for _,field in ipairs({"nextAt","openingAt"}) do
-            local value=savedFactory[field]
-            if type(value)=="number" and value==value and value>os.time() and value<=os.time()+5400 then factory[field]=value end
-        end
+    migrateFactory(env.FruitScoutFactory)
+    local legacy=read("Factory")
+    if type(legacy)=="string" then
+        local ok,record=pcall(function() return Http:JSONDecode(legacy) end)
+        if ok then migrateFactory(record) end
     end
+    local factory=factoryServers[game.JobId] or {job=game.JobId}
     local function saveFactory()
-        env.FruitScoutFactory=factory
-        save("Factory",Http:JSONEncode(factory))
+        if factory.observedAt then factoryServers[game.JobId]=factory end
+        local entries={}
+        for job,record in pairs(factoryServers) do
+            if os.time()-record.observedAt>21600 then factoryServers[job]=nil
+            else table.insert(entries,{job=job,at=record.observedAt}) end
+        end
+        table.sort(entries,function(a,b) return a.at>b.at end)
+        for i=65,#entries do factoryServers[entries[i].job]=nil end
+        env.FruitScoutFactoryServers=factoryServers
+        save("FactoryServersV8",Http:JSONEncode(factoryServers))
     end
-    local function factoryEnded()
+    saveFactory()
+    local function factoryEnded(kind)
+        -- A death signal and its announcement describe one raid, not two resets.
+        if kind~="manual" and factory.nextAt and factory.observedAt
+            and os.time()-factory.observedAt<10 then return end
+        factory.observedAt=os.time()
+        factory.kind=kind
         factory.nextAt=os.time()+5400
         factory.openingAt=nil
+        factory.activeUntil=nil
         saveFactory()
     end
     table.insert(connections,syncFactoryButton.Activated:Connect(function()
         if not secondSea then return end
-        factoryEnded()
+        factoryEnded("manual")
         message="Factory estimate synced to your report that the raid just ended."
     end))
     local notificationSeen=setmetatable({}, {__mode="k"})
@@ -720,6 +827,7 @@ local function setup()
     local function updateFactory()
         if not secondSea then factoryStatus.Text="Factory: Second Sea only."; return end
         -- Ignore chat and Scout's own labels. Only a changing game notification counts.
+        local event,priority=nil,0
         for _,obj in ipairs(parent:GetDescendants()) do
             if obj:IsA("TextLabel") and not obj:IsDescendantOf(gui) then
                 local ancestor=obj.Parent
@@ -733,16 +841,28 @@ local function setup()
                     ancestor=ancestor.Parent
                 end
                 local value=obj.Text
-                if notificationReady and notification and not chat and visible and notificationSeen[obj]~=value
-                    and value:lower():find("we are breaching the factory in 30 seconds",1,true) then
-                    factory.openingAt=os.time()+30
-                    factory.nextAt=nil
-                    saveFactory()
+                if notificationReady and notification and not chat and visible and notificationSeen[obj]~=value then
+                    local plain=value:gsub("<[^>]*>",""):lower():gsub("%s+"," ")
+                    local matched,rank
+                    if plain:find("101 factory malffffunction. end.",1,true) then matched,rank="success",3
+                    elseif plain:find("factory poison control activated. all staff return to work immediately",1,true) then matched,rank="failure",3
+                    elseif plain:find("the factory has been breached. poison control activating in 5 minutes",1,true) then matched,rank="active",2
+                    elseif plain:find("we are breaching the factory in 30 seconds",1,true) then matched,rank="warning",1 end
+                    if matched and rank>priority then event,priority=matched,rank end
                 end
                 notificationSeen[obj]=value
             end
         end
         notificationReady=true
+        if event=="success" or event=="failure" then factoryEnded(event)
+        elseif event then
+            if factory.kind~=event or not factory.observedAt or os.time()-factory.observedAt>5 then
+                factory={job=game.JobId,observedAt=os.time(),kind=event}
+                if event=="warning" then factory.openingAt=os.time()+30
+                else factory.activeUntil=os.time()+300 end
+                saveFactory()
+            end
+        end
         local enemies=workspace:FindFirstChild("Enemies")
         local core=enemies and enemies:FindFirstChild("Core")
         local humanoid=core and core:FindFirstChildOfClass("Humanoid")
@@ -751,12 +871,14 @@ local function setup()
             trackedCore=core
             if humanoid and humanoid.Health>0 then
                 coreDeath=humanoid.Died:Connect(function()
-                    if not stopped then factoryEnded() end
+                    if not stopped then factoryEnded("core") end
                 end)
             end
         end
         if humanoid and humanoid.Health>0 then
             factoryStatus.Text="Factory: ACTIVE (Core detected)."
+        elseif factory.activeUntil and factory.activeUntil>os.time() then
+            factoryStatus.Text="Factory: ACTIVE (announcement).\nUp to ~"..minutesSeconds(factory.activeUntil-os.time()).." left."
         elseif factory.openingAt then
             local remaining=factory.openingAt-os.time()
             factoryStatus.Text=remaining>0 and "Factory opens in ~"..minutesSeconds(remaining)
@@ -764,7 +886,7 @@ local function setup()
             if remaining < -330 then factory.openingAt=nil; saveFactory() end
         elseif factory.nextAt then
             local remaining=factory.nextAt-os.time()
-            factoryStatus.Text=remaining>0 and "Factory next warning: ~"..minutesSeconds(remaining).." (estimate)"
+            factoryStatus.Text=remaining>0 and "Factory next raid: ~"..minutesSeconds(remaining).." (estimate)\nSaved for this server: "..factory.kind
                 or "Factory estimate elapsed; awaiting a game signal."
         else
             factoryStatus.Text="Factory: time unknown in this server. Sync after a raid ends."
@@ -783,6 +905,7 @@ local function setup()
         autoStore=value
         save("AutoStore",value)
         storeButton.Text=value and "Auto store: ON" or "Auto store: OFF"
+        storeButton.BackgroundColor3=value and theme.accent or theme.surface
     end
     setStore(autoStore)
     if autoStore then storeStatus.Text="Auto store enabled for physical fruits in your backpack or hand." end
@@ -1032,7 +1155,7 @@ local ok, err=xpcall(setup,function(problem) return tostring(problem) end)
 if not ok then showError(err) end
 ]====]
 if type(loadstring) ~= "function" then
-    message.Text = "Fruit Scout stopped: loadstring is unavailable in this execution environment."
+    message.Text = "KARMA stopped: loadstring is unavailable in this execution environment."
 else
     local run, compileError = loadstring(SOURCE)
     if not run then
@@ -1040,7 +1163,7 @@ else
     else
         local ok, runtimeError = pcall(run, SOURCE, false)
         if not ok then
-            warn("Fruit Scout startup: " .. tostring(runtimeError))
+            warn("KARMA startup: " .. tostring(runtimeError))
             if boot.Parent then message.Text = "Startup error: " .. tostring(runtimeError) end
         end
     end
