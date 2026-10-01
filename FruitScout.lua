@@ -1,4 +1,4 @@
--- KARMA v8. Paste this entire file into the executor editor.
+-- KARMA v9. Paste this entire file into the executor editor.
 -- Hide/reopen with the floating KARMA button. Drag the title or floating button.
 -- Scans loaded fruit candidates. Auto hop starts only when you tap its button.
 -- The bundled source is compiled locally; there are no remote code downloads.
@@ -62,7 +62,7 @@ titleBar.Font=Enum.Font.GothamBold
 titleBar.TextColor3=theme.accent
 titleBar.Active=true
 titleBar.Size=UDim2.new(1,-100,0,38)
-local subtitle=text("BLOX FRUITS  /  v8",43,16,10)
+local subtitle=text("BLOX FRUITS  /  v9",43,16,10)
 subtitle.TextColor3=theme.muted
 local status=text("Preparing scanner...",0,37,11)
 status.Name="KarmaStatus"
@@ -70,11 +70,11 @@ status.Position=UDim2.new(0,12,1,-43)
 status.TextColor3=theme.muted
 local sidebar=create("ScrollingFrame",{Name="KarmaSidebar",Position=UDim2.fromOffset(8,72),
     Size=UDim2.new(0,104,1,-124),BackgroundTransparency=1,BorderSizePixel=0,
-    CanvasSize=UDim2.fromOffset(0,184),ScrollBarThickness=2,ScrollBarImageColor3=theme.accent,
+    CanvasSize=UDim2.fromOffset(0,230),ScrollBarThickness=2,ScrollBarImageColor3=theme.accent,
     ScrollingDirection=Enum.ScrollingDirection.Y},panel)
 local pages,tabButtons={},{}
 local activeTab="Fruits"
-for i,name in ipairs({"Fruits","Chests","Factory","Servers"}) do
+for i,name in ipairs({"Fruits","Chests","Factory","Servers","Player"}) do
     local page=create("ScrollingFrame",{Name="KarmaPage"..name,Position=UDim2.fromOffset(120,72),
         Size=UDim2.new(1,-132,1,-124),BackgroundTransparency=1,BorderSizePixel=0,
         CanvasSize=UDim2.fromOffset(0,name=="Fruits" and 390 or 330),ScrollBarThickness=3,
@@ -137,6 +137,10 @@ local autoButton=button("Auto hop: OFF",108,pages.Servers)
 local hopButton=button("Hop once",158,pages.Servers)
 local scanButton=button("Scan now",208,pages.Servers)
 text("Hopping pauses while travelling or carrying an unstored fruit.",262,60,12,pages.Servers).TextColor3=theme.muted
+local antiStunButton=button("Anti stun: OFF",38,pages.Player)
+local antiStunStatus=text("Off. Enable to try local stun recovery.",98,92,13,pages.Player)
+antiStunStatus.Name="AntiStunStatus"
+text("Experimental: needs a locally exposed stun flag. Server-enforced stuns may remain. Hiding KARMA keeps the toggle running.",206,112,12,pages.Player).TextColor3=theme.muted
 local closeButton=button("Hide",12,panel)
 closeButton.Size=UDim2.fromOffset(54,34)
 closeButton.Position=UDim2.new(1,-66,0,14)
@@ -311,6 +315,69 @@ local function setup()
         save("Running", false)
         originalClose()
     end
+    -- Opt-in adapter for locally exposed character flags. No immunity is assumed.
+    local antiStun=false
+    local stunResets=0
+    local function setAntiStun(value)
+        antiStun=value
+        antiStunButton.Text=value and "Anti stun: ON" or "Anti stun: OFF"
+        antiStunButton.BackgroundColor3=value and theme.accent or theme.surface
+        antiStunStatus.Text=value and "Checking this character for compatible stun flags..."
+            or "Off. Local stun recovery stopped."
+    end
+    table.insert(connections,antiStunButton.Activated:Connect(function()
+        if not stopped then setAntiStun(not antiStun) end
+    end))
+    local function neutralValue(value)
+        if type(value)=="boolean" then return false end
+        if type(value)=="number" and value==value and math.abs(value)<1e12 and value>=0 then return 0 end
+    end
+    local function recoverLocalStun()
+        local character=player.Character
+        local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+        if not character or not humanoid or humanoid.Health<=0 then
+            antiStunStatus.Text="Waiting for a living character..."; return
+        end
+        local compatible,changed=0,0
+        for _,name in ipairs({"Stun","Stunned"}) do
+            local flag=character:FindFirstChild(name)
+            if flag and (flag:IsA("NumberValue") or flag:IsA("IntValue") or flag:IsA("BoolValue")) then
+                local neutral=neutralValue(flag.Value)
+                if neutral~=nil then
+                    compatible=compatible+1
+                    if flag.Value~=neutral then flag.Value=neutral; changed=changed+1 end
+                end
+            end
+            local value=character:GetAttribute(name)
+            local neutral=neutralValue(value)
+            if neutral~=nil then
+                compatible=compatible+1
+                if value~=neutral then character:SetAttribute(name,neutral); changed=changed+1 end
+            end
+        end
+        if changed>0 then
+            stunResets=stunResets+changed
+            -- Only release this state alongside an actual stun flag, never force a seat exit.
+            if humanoid.PlatformStand and not humanoid.Sit and not humanoid.SeatPart then
+                humanoid.PlatformStand=false
+            end
+        end
+        antiStunStatus.Text=compatible>0
+            and "Watching "..compatible.." local flags. Resets: "..stunResets..". Server stuns may remain."
+            or "No compatible local stun flags detected. Anti stun is unavailable for this character."
+    end
+    task.spawn(function()
+        while not stopped do
+            if antiStun then
+                local ok,err=pcall(recoverLocalStun)
+                if not ok then
+                    setAntiStun(false)
+                    antiStunStatus.Text="Recovery paused: "..tostring(err):sub(1,110)
+                end
+            end
+            task.wait(antiStun and 0.2 or 1)
+        end
+    end)
     local scanError = nil
     local function clean(value)
         if type(value)~="string" or #value>120 then return nil end
